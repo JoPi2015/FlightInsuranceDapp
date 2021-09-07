@@ -6,6 +6,29 @@ pragma solidity ^0.4.25;
 
 import "../node_modules/openzeppelin-solidity/contracts/math/SafeMath.sol";
 
+
+/* Interface for FlightSuretyData */
+contract FlightSuretyData{
+    function isOperational() view returns(bool);
+    function registerAirline(address airline,address airline_mum) external;
+    function CountAirline() external view returns (uint256);
+    function isRegistered(address airline) external view returns (bool);
+    function isFunded(address airline) external view returns (bool);
+    function fundAirline(address airline) public payable;
+    function RegisterFlight(string _flightRef,uint8 _statusCode,uint256 _updatedTimestamp,address _airline);
+    function processFlightStatus(address airline,string memory flight,uint256 timestamp,uint8 statusCode);
+    function buy( address airline,string flightRef,uint256 timestamp,uint256 amount,address passenger_account);
+    function creditInsurees(address airline,string flightRef,uint256 timestamp);
+    function pay(address clientaddress);
+    function listflights() external view returns (bytes32[]);
+    function read_flight_ref(bytes32 flightKey) external view returns (string);
+    function read_flight_airline(bytes32 flightKey) external view returns (address);
+    function read_flight_timestamp(bytes32 flightKey) external view returns (uint256);
+    function read_flight_index(bytes32 flightKey) external view returns (uint256);
+}
+
+
+
 /************************************************** */
 /* FlightSurety Smart Contract                      */
 /************************************************** */
@@ -25,15 +48,13 @@ contract FlightSuretyApp {
     uint8 private constant STATUS_CODE_LATE_OTHER = 50;
 
     address private contractOwner;          // Account used to deploy contract
+    // JP 24/8/2021
+    FlightSuretyData FSD;
 
-    struct Flight {
-        bool isRegistered;
-        uint8 statusCode;
-        uint256 updatedTimestamp;        
-        address airline;
-    }
-    mapping(bytes32 => Flight) private flights;
+    uint256 public tresholdforfunding=10 ether;
+    
 
+    mapping(address => address[]) internal airlines_votes;
  
     /********************************************************************************************/
     /*                                       FUNCTION MODIFIERS                                 */
@@ -50,7 +71,7 @@ contract FlightSuretyApp {
     modifier requireIsOperational() 
     {
          // Modify to call data contract's status
-        require(true, "Contract is currently not operational");  
+        require(isOperational()==true, "Contract is currently not operational");  
         _;  // All modifiers require an "_" which indicates where the function body will be added
     }
 
@@ -63,6 +84,22 @@ contract FlightSuretyApp {
         _;
     }
 
+    modifier isRegisteredAirline()
+    {
+        require(FSD.isRegistered(msg.sender),"Caller is not a registered airline");
+        _;
+    }
+
+     modifier isFundedAirline()
+    {
+        require(FSD.isFunded(msg.sender),"Caller is not a funded airline");
+        _;
+    }
+    modifier reachTreshold()
+    {
+        require(msg.value >= tresholdforfunding,"Not enought ether paid (10 ETH)");
+        _;
+    }
     /********************************************************************************************/
     /*                                       CONSTRUCTOR                                        */
     /********************************************************************************************/
@@ -73,10 +110,13 @@ contract FlightSuretyApp {
     */
     constructor
                                 (
+                                    address datacontract
                                 ) 
                                 public 
     {
         contractOwner = msg.sender;
+        FSD=FlightSuretyData(datacontract);
+
     }
 
     /********************************************************************************************/
@@ -85,10 +125,10 @@ contract FlightSuretyApp {
 
     function isOperational() 
                             public 
-                            pure 
+                            view 
                             returns(bool) 
     {
-        return true;  // Modify to call data contract's status
+        return FSD.isOperational();  // Modify to call data contract's status
     }
 
     /********************************************************************************************/
@@ -102,27 +142,82 @@ contract FlightSuretyApp {
     */   
     function registerAirline
                             (   
+                                address airline
                             )
                             external
-                            pure
+                            isRegisteredAirline
+                            isFundedAirline
                             returns(bool success, uint256 votes)
     {
-        return (success, 0);
+        uint256 countairline=FSD.CountAirline();
+        success=false;
+        votes=0;
+        
+        if (FSD.isRegistered(airline)==false){
+            if (countairline < 5){
+                success=true;                    
+            }else{
+                bool hasVoted=false;
+                for (uint i=0; i < airlines_votes[airline].length; i++) {
+                    if (airlines_votes[airline][i] == msg.sender) {
+                        hasVoted = true;
+                        break;
+                    }
+                }
+                if (hasVoted==false){
+                    airlines_votes[airline].push(msg.sender);
+                }
+                votes=airlines_votes[airline].length;
+                if (votes > countairline.div(2)){
+                    success=true;
+                }
+            }
+            if (success==true){FSD.registerAirline(airline,(msg.sender));}
+        }     
+        
+        return (success, votes);
     }
 
+    function FundMyAirline() 
+        external
+        isRegisteredAirline
+        reachTreshold
+        requireIsOperational
+        payable
+    {
+        FSD.fundAirline.value(msg.value)(msg.sender);
+    }
 
    /**
     * @dev Register a future flight for insuring.
     *
     */  
+
     function registerFlight
                                 (
+                                    string _flightRef,
+                                    uint8 _statusCode,
+                                    uint256 _updatedTimestamp  
                                 )
                                 external
-                                pure
+                                isRegisteredAirline
+                                isFundedAirline
     {
-
+        FSD.RegisterFlight(_flightRef,_statusCode, _updatedTimestamp, msg.sender);
     }
+
+    function buy( address airline,string flightRef,uint256 timestamp,uint256 amount,address passenger_account)
+        external {
+            FSD.buy(airline,flightRef,timestamp,amount,passenger_account);
+        }
+    function creditInsurees(address airline,string flightRef,uint256 timestamp) external {
+        FSD.creditInsurees(airline,flightRef,timestamp);
+    }
+    function pay(address clientaddress) external {
+        FSD.pay(clientaddress);
+    }
+
+
     
    /**
     * @dev Called after oracle has updated flight status
@@ -136,10 +231,27 @@ contract FlightSuretyApp {
                                     uint8 statusCode
                                 )
                                 internal
-                                pure
+                                requireIsOperational
     {
+        FSD.processFlightStatus(airline,flight,timestamp,statusCode);
     }
 
+    function listflights() public returns (bytes32[]){
+        return FSD.listflights();
+    }
+    function read_flight_index(bytes32 flightKey) returns (uint256){
+        return FSD.read_flight_index(flightKey);
+    }
+    function read_flight_ref(bytes32 flightKey) public returns(string){
+        return FSD.read_flight_ref(flightKey);
+    }
+    function read_flight_airline(bytes32 flightKey) public returns(address){
+        return FSD.read_flight_airline(flightKey);
+    }
+    function read_flight_timestamp(bytes32 flightKey) public returns(uint256){
+       return FSD.read_flight_timestamp(flightKey);
+    }
+    
 
     // Generate a request for oracles to fetch flight information
     function fetchFlightStatus
